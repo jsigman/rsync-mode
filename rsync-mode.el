@@ -70,6 +70,9 @@ Each path should have the form 'host:/path/to/project'.")
 (defvar-local rsync--process nil
   "Rsync process object.")
 
+(defvar rsync--pending-sync nil
+  "Flag to indicate if a sync request was made while another was in progress.")
+
 (defvar-local rsync--spinner nil
   "Rsync spinner object.")
 
@@ -89,6 +92,7 @@ These must have the form hostname:path/to/repo (relative or absolute).")
 
 (defun rsync--start-spinner ()
   "Create and start a spinner on this buffer."
+  (message "rsync--start-spinner called")
   (when rsync-mode
     (unless rsync--spinner
       (setq rsync--spinner (spinner-create 'progress-bar-filled t)))
@@ -101,6 +105,7 @@ These must have the form hostname:path/to/repo (relative or absolute).")
   ;; The indicator for the mode line
   :lighter rsync--lighter
   :group 'rsync
+  (message "rsync-mode toggled: %s" (if rsync-mode "ON" "OFF"))
   (if (not rsync-remote-paths)
       (message "Failed to activate rsync-mode: No remote configuration for rsync-mode found in dir-locals.")
     (if (not rsync-mode)
@@ -129,7 +134,27 @@ REMOTE-PATH is the path to the rsync destination."
 PROC is the rsync process, which is present for call signature
 compatibility only. EVENT is the description of the event that
 changed the state of the rsync process."
-  (funcall rsync--process-exit-hook proc event))
+  (funcall rsync--process-exit-hook proc event)
+  (when rsync--pending-sync
+    (setq rsync--pending-sync nil)
+    (message "Processing queued sync request.")
+    (rsync-all)))
+
+(defun rsync--make-process-exit-hook (buffer)
+  "Create function to clean up the spinner for BUFFER.
+The created function will also message the user when the rsync
+process is complete and forward abnormal event strings."
+  (lambda (_ event)
+    (message "rsync--make-process-exit-hook closure called: %s" event)
+    (with-current-buffer buffer
+      (when rsync-mode
+        (spinner-stop rsync--spinner))
+      (when rsync--process
+        (delete-process rsync--process))
+      (setq rsync--process nil))
+    (if (not (string-equal event "finished\n"))
+        (message "Rsync process received abnormal event %s" event)
+      (message "Rsync complete."))))
 
 (defun rsync--make-process-exit-hook (buffer)
   "Create function to clean up the spinner for BUFFER.
@@ -148,7 +173,6 @@ process is complete and forward abnormal event strings."
 
 (defun rsync--build-args (remote-path excludes local-path &optional dry-run file)
   "Create an argument list to be passed to the rsync process.
-
 If FILE is non-nil, only that file will be synced.
 If DRY-RUN is t, rsync will be run in dry-run mode.
 If EXCLUDES is non-nil, those directories will be excluded from
@@ -156,6 +180,7 @@ the synchronization.
 LOCAL-PATH specifies the path to the local directory root, or the
 local file, if FILE is non-nil.
 REMOTE-PATH specifies the path to the remote repository."
+  (message "rsync--build-args called: remote-path=%s dry-run=%s file=%s" remote-path (if dry-run "true" "false") (or file "nil"))
   (let ((remote-path (string-join
                       (mapcar
                        (lambda (x) (shell-quote-argument x))
@@ -174,6 +199,7 @@ REMOTE-PATH specifies the path to the remote repository."
 
 Merges the list of RSYNC-EXCLUDED-DIRS with
 RSYNC-DEFAULT-EXCLUDED-DIRS and deletes duplicates."
+  (message "rsync--get-excludes called")
   (flatten-list
    (mapcar (lambda (x) (format "--exclude=%s" (shell-quote-argument x)))
            (delete-dups
@@ -188,22 +214,26 @@ the dry-run flag.
 
 If FILE is non-nil, sync only that file. The path specified
 by FILE is assumed to be relative to LOCAL-PATH."
-  (rsync--start-spinner)
+  (message "rsync--run called: remote-path=%s local-path=%s dry-run=%s file=%s" remote-path local-path (if dry-run "true" "false") (or file "nil"))
   (if rsync--process
-      (error "Cannot start a new rsync process until the existing one finishes.")
-    (setq rsync--process
-          (apply
-           #'start-process
-           `("rsync"
-             ,(rsync--get-rsync-buffer-name remote-path)
-             "rsync"
-             ,@(rsync--build-args remote-path excludes local-path dry-run file))))
-    (with-current-buffer (rsync--get-rsync-buffer-name remote-path)
-      (goto-char (point-max))
-      (skip-chars-backward "\n[:space:]")
-      (insert (concat "\n\n" (time-stamp-string) "\n")))
-    (setq rsync--process-exit-hook (rsync--make-process-exit-hook (current-buffer)))
-    (set-process-sentinel rsync--process #'rsync--run-process-exit-hook)))
+      (progn
+        (message "Rsync already in progress, queuing sync request.")
+        (setq rsync--pending-sync t))
+    (progn
+      (rsync--start-spinner)
+      (setq rsync--process
+            (apply
+             #'start-process
+             `("rsync"
+               ,(rsync--get-rsync-buffer-name remote-path)
+               "rsync"
+               ,@(rsync--build-args remote-path excludes local-path dry-run file))))
+      (with-current-buffer (rsync--get-rsync-buffer-name remote-path)
+        (goto-char (point-max))
+        (skip-chars-backward "\n[:space:]")
+        (insert (concat "\n\n" (time-stamp-string) "\n")))
+      (setq rsync--process-exit-hook (rsync--make-process-exit-hook (current-buffer)))
+      (set-process-sentinel rsync--process #'rsync--run-process-exit-hook))))
 
 (defun rsync-all (&optional dry-run file)
   "Synchronize the current project to all remote hosts.
@@ -212,8 +242,10 @@ If DRY-RUN is t, call rsync with the dry-run flag.
 If FILE is non-nil, sync only that file. The path specified
 by FILE is assumed to be relative to RSYNC-LOCAL-PATH."
   (interactive)
+  (message "rsync-all called: dry-run=%s file=%s" (if dry-run "true" "false") (or file "nil"))
   (unless rsync-remote-paths
     (error "No remote paths configured for rsync"))
+  (setq rsync--pending-sync nil) ; Reset the pending sync flag
   (dolist (remote-path rsync-remote-paths)
     (condition-case err
         (rsync--run
@@ -228,6 +260,7 @@ by FILE is assumed to be relative to RSYNC-LOCAL-PATH."
   "Interactively select the remote for synchronization.
 REMOTE is the selected remote host."
   (interactive)
+  (message "rsync--select-remote called")
   (completing-read "Rsync project to: " rsync-remote-paths nil t))
 
 (defun rsync (&optional dry-run file)
@@ -239,6 +272,7 @@ dry-run flag.
 If FILE is non-nil, sync only that file. The path specified
 by FILE is assumed to be relative to RSYNC-LOCAL-PATH."
   (interactive)
+  (message "rsync called: dry-run=%s file=%s" (if dry-run "true" "false") (or file "nil"))
   (let ((selected-remote (call-interactively #'rsync--select-remote)))
     (rsync--run selected-remote (rsync--get-excludes) rsync-local-path dry-run file)))
 
