@@ -155,10 +155,10 @@ LOCAL-PATH specifies the path to the local directory root, or the
 local file, if FILE is non-nil.
 REMOTE-PATH specifies the path to the remote repository."
   (let ((remote-path (string-join
-                       (mapcar
-                        (lambda (x) (shell-quote-argument x))
-                        (split-string remote-path ":"))
-                       ":")))
+                      (mapcar
+                       (lambda (x) (shell-quote-argument x))
+                       (split-string remote-path ":"))
+                      ":")))
     (seq-filter
      #'identity
      `(,(if file "-avR" "-av")
@@ -188,54 +188,57 @@ If FILE is non-nil, sync only that file. The path specified
 by FILE is assumed to be relative to LOCAL-PATH."
   (rsync--start-spinner)
   (if rsync--process
-      (message "Cannot start a new rsync process until the existing one finishes.")
+      (error "Cannot start a new rsync process until the existing one finishes.")
     (setq rsync--process
           (apply
            #'start-process
            `("rsync"
              ,(rsync--get-rsync-buffer-name remote-path)
              "rsync"
-             ,@(rsync--build-args remote-path excludes local-path dry-run file)))))
-  (with-current-buffer (rsync--get-rsync-buffer-name remote-path)
-    (goto-char (point-max))
-    (skip-chars-backward "\n[:space:]")
-    (insert (concat "\n\n" (time-stamp-string) "\n")))
-  (setq rsync--process-exit-hook (rsync--make-process-exit-hook (current-buffer)))
-  (set-process-sentinel rsync--process #'rsync--run-process-exit-hook))
+             ,@(rsync--build-args remote-path excludes local-path dry-run file))))
+    (with-current-buffer (rsync--get-rsync-buffer-name remote-path)
+      (goto-char (point-max))
+      (skip-chars-backward "\n[:space:]")
+      (insert (concat "\n\n" (time-stamp-string) "\n")))
+    (setq rsync--process-exit-hook (rsync--make-process-exit-hook (current-buffer)))
+    (set-process-sentinel rsync--process #'rsync--run-process-exit-hook))
 
-(defun rsync-all (&optional dry-run file)
-  "Synchronize the current project to all remote hosts.
+  (defun rsync-all (&optional dry-run file)
+    "Synchronize the current project to all remote hosts.
 If DRY-RUN is t, call rsync with the dry-run flag.
 
 If FILE is non-nil, sync only that file. The path specified
 by FILE is assumed to be relative to RSYNC-LOCAL-PATH."
-  (interactive)
-  (when rsync-remote-paths
+    (interactive)
+    (unless rsync-remote-paths
+      (error "No remote paths configured for rsync"))
     (dolist (remote-path rsync-remote-paths)
-      (rsync--run
-       remote-path
-       (rsync--get-excludes)
-       rsync-local-path
-       dry-run
-       file))))
+      (condition-case err
+          (rsync--run
+           remote-path
+           (rsync--get-excludes)
+           rsync-local-path
+           dry-run
+           file)
+        (error (message "Error during rsync to %s: %s" remote-path (error-message-string err))))))
 
-(defun rsync--select-remote ()
-  "Interactively select the remote for synchronization.
+  (defun rsync--select-remote ()
+    "Interactively select the remote for synchronization.
 REMOTE is the selected remote host."
-  (interactive)
-  (completing-read "Rsync project to: " rsync-remote-paths nil t))
+    (interactive)
+    (completing-read "Rsync project to: " rsync-remote-paths nil t))
 
-(defun rsync (&optional dry-run file)
-  "Synchronize the current project to a single remote host.
+  (defun rsync (&optional dry-run file)
+    "Synchronize the current project to a single remote host.
 The host is selected interactively by the function
 `rsync--select-remote'. If DRY-RUN is t, call rsync with the
 dry-run flag.
 
 If FILE is non-nil, sync only that file. The path specified
 by FILE is assumed to be relative to RSYNC-LOCAL-PATH."
-  (interactive)
-  (let ((selected-remote (call-interactively #'rsync--select-remote)))
-    (rsync--run selected-remote (rsync--get-excludes) rsync-local-path dry-run file)))
+    (interactive)
+    (let ((selected-remote (call-interactively #'rsync--select-remote)))
+      (rsync--run selected-remote (rsync--get-excludes) rsync-local-path dry-run file)))
 
-(provide 'rsync-mode)
+  (provide 'rsync-mode)
 ;;; rsync-mode.el ends here
