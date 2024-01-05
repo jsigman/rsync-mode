@@ -139,6 +139,8 @@ process is complete and forward abnormal event strings."
     (with-current-buffer buffer
       (when rsync-mode
         (spinner-stop rsync--spinner))
+      (when rsync--process
+        (delete-process rsync--process))
       (setq rsync--process nil))
     (if (not (string-equal event "finished\n"))
         (message "Rsync process received abnormal event %s" event)
